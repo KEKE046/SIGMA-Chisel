@@ -22,14 +22,16 @@ class XBar[T <: Data](dtype: T, num: Int) extends Module {
   def latency = 0
 }
 
-class PE[T <: UInt](inputType: T, outputType: T) extends Module {
+class PE[T <: Data](inputType: T, outputType: T)(implicit ev: Arithmetic[T]) extends Module {
+  import ev._
+
   val io = IO(new Bundle {
     val in_data = Input(Valid(inputType))
     val in_stationary = Input(Bool())
     val out_data = Valid(outputType)
   })
 
-  private val buf = RegInit(inputType, 0.U.asTypeOf(inputType))
+  private val buf = Reg(inputType)
   private val buf_valid = RegInit(Bool(), 0.B)
 
   when(io.in_stationary && io.in_data.valid) {
@@ -39,9 +41,9 @@ class PE[T <: UInt](inputType: T, outputType: T) extends Module {
 
   private val out = Wire(io.out_data.cloneType)
   private val mul_valid = buf_valid && io.in_data.valid
-  private val mul_a = Mux(mul_valid, io.in_data.bits, 0.U)
-  private val mul_b = Mux(mul_valid, buf, 0.U)
-  private val mul = mul_a * mul_b
+  private val mul_a = Mux(mul_valid, io.in_data.bits, inputType.zero)
+  private val mul_b = Mux(mul_valid, buf, inputType.zero)
+  private val mul = mul_a.mac(mul_b, outputType.zero)
   out.valid := mul_valid
   out.bits  := mul
   io.out_data := out
@@ -49,7 +51,8 @@ class PE[T <: UInt](inputType: T, outputType: T) extends Module {
   def latency = 0
 }
 
-class FanNode[T <: UInt](dtype: T) extends Module {
+class FanNode[T <: Data](dtype: T)(implicit ev: Arithmetic[T]) extends Module {
+  import ev._
   val io = IO(new Bundle {
     val in_l = Input(Valid(dtype))
     val in_r = Input(Valid(dtype))
@@ -106,7 +109,7 @@ class FanNode[T <: UInt](dtype: T) extends Module {
   }
 }
 
-class FanNetwork[T <: UInt](dtype: T, num: Int) extends Module {
+class FanNetwork[T <: Data : Arithmetic](dtype: T, num: Int) extends Module {
   val io = IO(new Bundle {
     val in_data = Input(Vec(num, Valid(dtype)))
     val in_same = Input(Vec(num - 1, Bool()))
@@ -162,7 +165,7 @@ class FanNetwork[T <: UInt](dtype: T, num: Int) extends Module {
   def latency = numLayers
 }
 
-class FlexDPE[T <: UInt](inputType: T, outputType: T, num: Int) extends Module {
+class FlexDPE[T <: Data : Arithmetic](inputType: T, outputType: T, num: Int) extends Module {
   require(num >= 2)
   private val xbar = Module(new XBar(inputType, num))
   private val pe_array = Seq.fill(num)(Module(new PE(inputType, outputType)))
@@ -192,9 +195,9 @@ class FlexDPE[T <: UInt](inputType: T, outputType: T, num: Int) extends Module {
   val latency = xbar.latency + 1 + pe_array.head.latency + 1 + fan.latency
 }
 
-object Main extends App {
-  val f = new PrintWriter("gen.fir")
-  f.write(stage.ChiselStage.emitChirrtl(new FlexDPE(UInt(8.W), UInt(8.W), 8)))
-  f.flush()
-  f.close()
-}
+//object Main extends App {
+//  val f = new PrintWriter("gen.fir")
+//  f.write(stage.ChiselStage.emitChirrtl(new FlexDPE(UInt(8.W), UInt(8.W), 8)))
+//  f.flush()
+//  f.close()
+//}

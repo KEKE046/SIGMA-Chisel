@@ -76,5 +76,10 @@ class FanNetworkTest extends AnyFreeSpec with ChiselScalatestTester {
       }
     }
   }
+  "FanNetwork should be correctly generated for Float dtype" in {
+    test(new FanNetwork(Float(8, 8), 16)) { dut =>
+
+    }
+  }
 }
 
