@@ -2,7 +2,6 @@ package sigma
 
 import chisel3._
 import chisel3.util._
-import scala.collection.mutable
 import java.io.{File, PrintWriter}
 
 class XBar[T <: Data](dtype: T, num: Int) extends Module {
@@ -52,7 +51,7 @@ class PE[T <: Data](inputType: T, outputType: T)(implicit ev: Arithmetic[T]) ext
   def latency = 0
 }
 
-class FanNode[T <: Data](dtype: T, idx: Int)(implicit ev: Arithmetic[T]) extends Module {
+class FanNode[T <: Data](dtype: T)(implicit ev: Arithmetic[T]) extends Module {
   import ev._
   val io = IO(new Bundle {
     val in_l = Input(Valid(dtype))
@@ -106,9 +105,7 @@ class FanNode[T <: Data](dtype: T, idx: Int)(implicit ev: Arithmetic[T]) extends
     } .otherwise {
       io.out_final := io.in_l
     }
-    when(io.same_r) {
-      io.out_r := io.in_r
-    }
+    when(io.same_r) { io.out_r := io.in_r }
   }
 }
 
@@ -118,6 +115,7 @@ class FanNetwork[T <: Data : Arithmetic](dtype: T, num: Int) extends Module {
     val in_same = Input(Vec(num - 1, Bool()))
     val out_data = Output(Vec(num, Valid(dtype)))
   })
+  private val nodes = Seq.fill(num - 1)(Module(new FanNode(dtype)))
   private val numLayers = log2Ceil(num)
   private def pow2(p: Int) = math.pow(2, p).toInt
   private def reduceChild(side: Seq[Valid[T]]): Valid[T] = side.reduce[Valid[T]] {
@@ -128,75 +126,42 @@ class FanNetwork[T <: Data : Arithmetic](dtype: T, num: Int) extends Module {
       out.bits := Mux(up.valid, up.bits, cur.bits)
       out
   }
-  class FanNodeWrapper(layer: Int, idx: Int) extends Module {
-    val io = IO(new Bundle {
-      val in_l = Vec(math.max(layer, 1), Input(Valid(dtype)))
-      val in_r = Vec(math.max(layer, 1), Input(Valid(dtype)))
-      val same_l_border = Input(Bool())
-      val same_l = Input(Bool())
-      val same_m = Input(Bool())
-      val same_r = Input(Bool())
-      val same_r_border = Input(Bool())
-      val left_child = Input(Bool())
-      val out_l = Output(Valid(dtype))
-      val out_r = Output(Valid(dtype))
-      val out_data = Output(Valid(dtype))
-      val out_same_l_border = Output(Bool())
-      val out_same = Output(Bool())
-      val out_same_r_border = Output(Bool())
-    })
-    private val inner = Module(new FanNode(dtype, idx))
-    inner.io.in_l := reduceChild(io.in_l)
-    inner.io.in_r := reduceChild(io.in_r)
-    inner.io.same_l := io.same_l
-    inner.io.same_r := io.same_r
-    inner.io.same_m := io.same_m
-    inner.io.same_l_border := io.same_l_border
-    inner.io.same_r_border := io.same_r_border
-    inner.io.left_child := io.left_child
-    io.out_l := Pipe(inner.io.out_l)
-    io.out_r := Pipe(inner.io.out_r)
-    io.out_data := Pipe(inner.io.out_final, numLayers - layer - 1)
-    io.out_same_l_border := RegNext(inner.io.out_same_l_border)
-    io.out_same := RegNext(inner.io.out_same)
-    io.out_same_r_border := RegNext(inner.io.out_same_r_border)
-  }
-  val nodes = mutable.ArrayBuffer[Seq[FanNodeWrapper]]()
   for(layer <- 0 until numLayers) {
     val step = pow2(layer + 1)
     val start = pow2(layer) - 1
     val indices = start until num by step
-    val cur_layer = indices.map(x => Module(new FanNodeWrapper(layer, x)))
-    nodes += cur_layer
-    for((idx, mod) <- indices zip cur_layer) {
-      mod.io.left_child := ((idx - start) / step % 2 == 0).B
+    for(idx <- indices) {
+      val node = nodes(idx)
+      node.io.left_child := ((idx - start) / step % 2 == 0).B
       if(layer == 0) {
-        mod.io.same_l := true.B
-        mod.io.same_r := true.B
-        mod.io.same_m := io.in_same(idx)
-        if(idx == 0) mod.io.same_l_border := false.B
-        else mod.io.same_l_border := io.in_same(idx - 1)
-        if(idx == num - 2) mod.io.same_r_border := false.B
-        else mod.io.same_r_border := io.in_same(idx + 1)
-        mod.io.in_l.head := io.in_data(idx)
-        mod.io.in_r.head := io.in_data(idx + 1)
-        io.out_data(idx) := mod.io.out_data
+        node.io.same_l := true.B
+        node.io.same_r := true.B
+        node.io.same_m := io.in_same(idx)
+        if(idx == 0) node.io.same_l_border := false.B
+        else node.io.same_l_border := io.in_same(idx - 1)
+        if(idx == num - 2) node.io.same_r_border := false.B
+        else node.io.same_r_border := io.in_same(idx + 1)
+        node.io.in_l := io.in_data(idx)
+        node.io.in_r := io.in_data(idx + 1)
       }
       else {
-        val side_l = for (j <- 0 until layer) yield nodes(j)((idx + 1) / pow2(j+1) - 1)
-        val side_r = for (j <- 0 until layer) yield nodes(j)((idx + 1) / pow2(j+1))
-        mod.io.same_l := side_l.last.io.out_same
-        mod.io.same_r := side_r.last.io.out_same
-        mod.io.same_m := side_r.last.io.same_l_border
-        mod.io.same_l_border := side_l.last.io.out_same_l_border
-        mod.io.same_r_border := side_r.last.io.out_same_r_border
-        mod.io.in_l zip side_l foreach { x => x._1 := x._2.io.out_r }
-        mod.io.in_r zip side_r foreach { x => x._1 := x._2.io.out_l }
-        io.out_data(idx) := mod.io.out_data
+        val side_l = for (j <- 0 until layer) yield idx - pow2(j)
+        val side_r = for (j <- 0 until layer) yield idx + pow2(j)
+        val lhs = nodes(side_l.last)
+        val rhs = nodes(side_r.last)
+        node.io.same_l := RegNext(lhs.io.out_same)
+        node.io.same_r := RegNext(rhs.io.out_same)
+        node.io.same_l_border := RegNext(lhs.io.out_same_l_border)
+        node.io.same_m := RegNext(rhs.io.out_same_l_border)
+        node.io.same_r_border := RegNext(rhs.io.out_same_r_border)
+        node.io.in_l := Pipe(reduceChild(side_l.map(x => nodes(x).io.out_r)))
+        node.io.in_r := Pipe(reduceChild(side_r.map(x => nodes(x).io.out_l)))
       }
+      io.out_data(idx) := Pipe(node.io.out_final, numLayers - layer)
     }
   }
-  io.out_data(num - 1) := Pipe(nodes.head.last.io.out_r, numLayers - 1)
+  private val side_l = for (j <- 0 until numLayers) yield num - 1 - pow2(j)
+  io.out_data(num - 1) := Pipe(reduceChild(side_l.map(x => nodes(x).io.out_r)))
   def latency = numLayers
 }
 
